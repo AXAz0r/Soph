@@ -3,9 +3,15 @@ import json
 import random
 import os
 import re
-from collections import OrderedDict
+
+from utils import MRU
+
+
 
 class Text(markovify.Text):
+    sentenceEndPat = re.compile(r"[.?!]$")
+    posPat = re.compile(r"_.*")
+
     def __init__(self, input_text, state_size=2, chain=None):
         """
         input_text: A string.
@@ -19,6 +25,17 @@ class Text(markovify.Text):
         # Rejoined text lets us assess the novelty of generated setences
         self.rejoined_text = self.sentence_join(map(self.word_join, runs))
         self.chain = chain or markovify.Chain(runs, state_size)
+
+    def word_join(self, words):
+        """
+        Re-joins a list of words into a sentence.
+        """
+        ret = ""
+        for word in words:
+            if ret:
+                ret += " "
+            ret += Text.posPat.sub("", word)
+        return ret
 
     def split_into_sentences(text):
         potential_end_pat = re.compile(r"".join([
@@ -58,26 +75,41 @@ class Text(markovify.Text):
         return True
 
 class Corpus:
+    class ModelStore(dict):
+        def __init__(self, _dir):
+            self.dir = _dir
+            super(Corpus.ModelStore, self).__init__()
+            
+        def __missing__(self, key):
+            with open(os.path.join(self.dir, key)) as f:
+                contents = f.read()
+                new = Text.from_json(contents)
+                self[key] = new
+                return new
+
     def __init__(self, dir, filter=[]):
-        authorsPath = os.path.join(dir, "authors")
-        with open(authorsPath) as f:
-            self.authorIds = json.loads(f.read())
-            self.authors = {v:k for k,v in self.authorIds.items()}
-        self.models = {}
+        self.dir = dir
+        self.comboCache = MRU(3)
+        self.models = Corpus.ModelStore(self.dir)
 
-        for file in os.listdir(dir):
-            if file == "authors":
-                continue
-            if filter and not self.authorIds[file] in filter:
-                continue
+    def sentence_join(self, sentences):
+        """
+        Re-joins a list of sentences into the full text.
+        """
+        ret = ""
+        for s in sentences:
+            s = s.strip()
+            terminated = sentenceEndPat.match(s[-1])
+            if not terminated:
+                s = s + "."
+            if ret:
+                ret += " "
 
-            path = os.path.join(dir, file)
-            with open(path) as f:
-                try:
-                    contents = f.read()
-                    self.models[file] = Text.from_json(contents)
-                except:
-                    print ("Failed on {0}".format(file))
+            if self.correctCapitalization:
+                s = self.correctSentence(s)
+            ret += s
+        return ret
+
     def correctSentence(text):
         letter = re.compile(r"\w")
         upper = True
@@ -93,38 +125,58 @@ class Corpus:
         ret = re.sub(r"\bi\b", "I", ret)
         return ret
 
-    def impersonate(self, names, count=10):
-        models = [self.models[self.authors[name]] for name in names]
-
-        if len(models) == 1:
-            model = models[0]
-        else:
+    def getCombinedModel(self, ids):
+        key = "+".join(set(ids))
+        model = self.comboCache.get(key)
+        if not model:
+            models = [self.models[uid] for uid in ids]
             model = markovify.combine(models, [1]*len(models))
+            self.comboCache.insert(key, model)
+        return model
+
+    def impersonate(self, ids = [], count=10):
+        if len(ids) == 1:
+            model = self.models[ids[0]]
+        else:
+            model = self.getCombinedModel(ids)
+
         ret = []
+        tries = 0
         while len(ret) < count:
-            sen = model.make_short_sentence(140)
+            tries = tries+1
+            if tries > 2 * count:
+                break
+            sen = model.make_short_sentence(300)
             if sen:
-                ret.append(Corpus.correctSentence(sen))
+                #sen = Corpus.correctSentence(sen)
+                ret.append(sen)
         return ret 
-    def inventConversation(self, names, count=10):
-            models = [self.models[self.authors[name]] for name in names]
+
+    def inventConversation(self, ids, count=10):
+            models = [self.models[uid] for uid in ids]
             ret = []
-            
+            tries = 0
             while len(ret) < count:
+                tries = tries+1
+                if tries > 2 * count:
+                    break
                 i = random.randint(0,len(models)-1)
                 s = models[i].make_short_sentence(140)
                 if s:
-                    s = Corpus.correctSentence(s)
-                    ret.append( "{0}: {1}".format(names[i], s))
+                    #s = Corpus.correctSentence(s)
+                    ret.append( "{0}: {1}".format(ids[i], s))
             return ret
 
 if __name__ == "__main__":
-
-    corp = Corpus("./corpus", filter=["Jerka", "Lisa"])
-    lines = corp.impersonate(["Jerka"])
+    with open("authors", encoding="utf-8") as f:
+        authordata = f.read()
+        authors = json.loads(authordata)
+        authorLookup = {v:k for k,v in authors.items()}
+    corp = Corpus("./markovData2")
+    lines = corp.impersonate([authorLookup["Lisa"]])
     for line in lines:
         print (line)
 
-    lines = corp.inventConversation(["Jerka", "Lisa"])
+    lines = corp.inventConversation(["116294611550339080", "116294611550339080"])
     for line in lines:
         print (line)
